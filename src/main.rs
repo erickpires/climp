@@ -38,13 +38,14 @@ impl Display for Direction {
 #[allow(dead_code)]
 enum Operation {
     Open(usize),
-    Save(usize),
+    Save(usize, usize),
     Merge(usize, usize, Direction),
     Crop(usize, u32, u32, i32, i32),
 }
 
 const KEY_Q         : i32 = 'q' as i32;
 const KEY_O         : i32 = 'o' as i32;
+const KEY_S         : i32 = 's' as i32;
 const KEY_TAB       : i32 = 0x09;
 const KEY_ENTER     : i32 = 0x0a;
 const KEY_BACKSPACE : i32 = 0x7f;
@@ -123,20 +124,32 @@ fn main() {
         refresh();
 
         let mut key_o_pressed = false;
+        let mut key_s_pressed = false;
 
         let ch = getch();
         match ch {
             KEY_Q => { break; },
             KEY_O => { key_o_pressed = true },
+            KEY_S => { key_s_pressed = true },
 
             _     => { },
         };
 
         if key_o_pressed {
-            let new_file = open_file(minibuffer_window, screen_height, screen_width);
+            let new_file = open_file(minibuffer_window,
+                                     screen_height, screen_width, true);
             if new_file.is_some() {
                 opened_files.push(new_file.unwrap());
                 operations.push(Operation::Open(opened_files.len() - 1));
+            }
+        }
+
+        if key_s_pressed {
+            let new_file = open_file(minibuffer_window,
+                                     screen_height, screen_width, false);
+            if new_file.is_some() {
+                opened_files.push(new_file.unwrap());
+                operations.push(Operation::Save(0, opened_files.len() - 1));
             }
         }
     }
@@ -145,7 +158,8 @@ fn main() {
 }
 
 #[allow(unused_variables, unused_assignments)]
-fn open_file(win: WINDOW,screen_height: i32, screen_width: i32) -> Option<PathBuf> {
+fn open_file(win: WINDOW, screen_height: i32, screen_width: i32,
+             file_must_exists: bool) -> Option<PathBuf> {
     let mut string = get_current_path();
 
     let mut done = false;
@@ -209,7 +223,8 @@ fn open_file(win: WINDOW,screen_height: i32, screen_width: i32) -> Option<PathBu
             if !do_open_file {
                 return None;
             } else {
-                if let Ok(path_buf) = handle_file_opening(&string) {
+                if let Ok(path_buf) = handle_file_opening(&string,
+                                                          file_must_exists) {
                     return Some(path_buf);
                 } else {
                     wbkgd(win, COLOR_PAIR(ERROR_COLOR));
@@ -228,19 +243,22 @@ fn open_file(win: WINDOW,screen_height: i32, screen_width: i32) -> Option<PathBu
 // NOTE(erick): Since we don't have a goto statement
 // this function was extracted from the code above so
 // we can do early-outs an keep the code more readable.
-fn handle_file_opening(string: &String) -> Result<PathBuf, ()> {
+fn handle_file_opening(string: &String,
+                       file_must_exists: bool) -> Result<PathBuf, ()> {
     // TODO(erick): We already had a PathBuf before,
     // we should not have to construct one here.
     let path = Path::new(string.as_str());
-    let meta_data = std::fs::metadata(path);
 
-    if meta_data.is_err() {
-        return Err ( () )
-    }
+    if file_must_exists {
+        let meta_data = std::fs::metadata(path);
+        if meta_data.is_err() {
+            return Err ( () )
+        }
 
-    let meta_data = meta_data.unwrap();
-    if !meta_data.is_file() {
-        return Err( () )
+        let meta_data = meta_data.unwrap();
+        if !meta_data.is_file() {
+            return Err( () )
+        }
     }
 
     let mut path_buf = PathBuf::new();
@@ -430,8 +448,8 @@ fn wprint_operations(window: WINDOW,
                                         file_stem(&opened_files[file_index])).as_str());
 
             },
-            &Operation::Save(file_index) => {
-                wprintw(window, format!("Save({})",
+            &Operation::Save(op_index, file_index) => {
+                wprintw(window, format!("Save({}: {})", op_index,
                                         file_stem(&opened_files[file_index])).as_str());
             },
             &Operation::Merge(op1_index, op2_index, ref dir) => {
