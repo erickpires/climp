@@ -1,13 +1,13 @@
 extern crate ncurses;
 extern crate nix;
 
-use std::fs::File;
+use std::fmt::Display;
+use std::fmt::Formatter;
+
 use std::path::Path;
 use std::path::PathBuf;
 use std::fs::read_dir;
 use std::fs::canonicalize;
-
-use std::io::Write;
 
 use std::char;
 use ncurses::*;
@@ -20,13 +20,25 @@ use nix::sys::signal::sigaction;
 
 use nix::sys::signal::SIGINT;
 
+#[allow(dead_code)]
 enum Direction {
     Horizontal,
     Vertical,
 }
 
+impl Display for Direction {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        match self {
+            &Direction::Horizontal => write!(f, "Hor"),
+            &Direction::Vertical   => write!(f, "Ver"),
+        }
+    }
+}
+
+#[allow(dead_code)]
 enum Operation {
     Open(usize),
+    Save(usize),
     Merge(usize, usize, Direction),
     Crop(usize, u32, u32, i32, i32),
 }
@@ -89,6 +101,9 @@ fn main() {
 
     let mut selected_operation = -1;
 
+    // NOTE(erick): The name 'opened_files' is a bit misleading
+    // since the files are only opened when the manipulation is
+    // applied.
     let mut opened_files = Vec::new();
     let mut operations = Vec::new();
     loop {
@@ -327,7 +342,7 @@ fn maximum_prefix(strings: &Vec<String>) -> String {
 
         let ch = strings_chars[0][result_len];
         for string_chars in &strings_chars {
-            if result_len == string_chars.len() {break 'outter; }
+            if result_len == string_chars.len() { break 'outter; }
             if string_chars[result_len] != ch { break 'outter; }
         }
 
@@ -352,10 +367,7 @@ fn get_char(ch: i32) -> char {
     char::from_u32(ch as u32).expect("Invalid char")
 }
 
-fn print_i32_char(ch: i32) {
-    wprint_i32_char(stdscr(), ch);
-}
-
+#[allow(dead_code)]
 fn wprint_i32_char(win: WINDOW, ch: i32) {
     wprintw(win, format!("{}", get_char(ch)).as_ref());
 }
@@ -383,18 +395,15 @@ fn wprint_files(window: WINDOW, files: &Vec<PathBuf>) {
     let mut file_number = 1;
     for file in files {
         wmove(window, file_number, 0);
-        let file_stem = file.file_stem();
-        if file_stem.is_some() {
-            wprintw(window, format!("{}: {}",
-                                    file_number,
-                                    file_stem.unwrap().to_string_lossy())
-                    .as_str());
-        }
+
+        wprintw(window, format!("{}: {}",
+                                file_number, file_stem(file)).as_str());
 
         file_number += 1;
     }
 }
 
+#[allow(unused_variables)]
 fn wprint_operations(window: WINDOW,
                      operations: &Vec<Operation>, opened_files: &Vec<PathBuf>,
                      selected_operation: i32) {
@@ -417,15 +426,17 @@ fn wprint_operations(window: WINDOW,
 
         match operation {
             &Operation::Open(file_index) => {
-                let file_stem = opened_files[file_index].file_stem();
-                if file_stem.is_some() {
-                    wprintw(window, format!("Open({})",
-                                            file_stem.unwrap().to_string_lossy())
-                            .as_str());
-                }
+                wprintw(window, format!("Open({})",
+                                        file_stem(&opened_files[file_index])).as_str());
+
+            },
+            &Operation::Save(file_index) => {
+                wprintw(window, format!("Save({})",
+                                        file_stem(&opened_files[file_index])).as_str());
             },
             &Operation::Merge(op1_index, op2_index, ref dir) => {
-
+                wprintw(window, format!("Merge({}, {}, {})",
+                                        op1_index, op2_index, dir).as_str());
             },
             &Operation::Crop(op_index, x, y, w, h) => {
 
@@ -437,4 +448,19 @@ fn wprint_operations(window: WINDOW,
         }
         operation_number += 1;
     }
+}
+
+fn file_stem (path: &PathBuf) -> String {
+    let file_stem = path.file_stem();
+    if file_stem.is_none() {
+        return "NO NAME".to_string();
+    }
+
+    let file_stem = file_stem.unwrap();
+    let result = file_stem.to_os_string().into_string();
+    if result.is_err() {
+        return "NO NAME".to_string();
+    }
+
+    result.unwrap()
 }
