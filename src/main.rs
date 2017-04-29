@@ -1,3 +1,5 @@
+#[macro_use]
+extern crate scopeguard;
 extern crate ncurses;
 extern crate nix;
 
@@ -11,6 +13,7 @@ use std::fs::canonicalize;
 
 use std::char;
 use ncurses::*;
+use ncurses::CURSOR_VISIBILITY::CURSOR_INVISIBLE;
 
 use nix::sys::signal::SigAction;
 use nix::sys::signal::SigHandler;
@@ -46,6 +49,7 @@ enum Operation {
 const KEY_Q         : i32 = 'q' as i32;
 const KEY_O         : i32 = 'o' as i32;
 const KEY_S         : i32 = 's' as i32;
+const KEY_M         : i32 = 'm' as i32;
 const KEY_TAB       : i32 = 0x09;
 const KEY_ENTER     : i32 = 0x0a;
 const KEY_BACKSPACE : i32 = 0x7f;
@@ -60,8 +64,9 @@ extern fn stop_program(_: i32) {
     std::process::exit(0);
 }
 
-const ERROR_COLOR     : i16 = 1;
-const HIGHLIGHT_COLOR : i16 = 2;
+const NORMAL_COLOR    : i16 = 1;
+const ERROR_COLOR     : i16 = 2;
+const HIGHLIGHT_COLOR : i16 = 3;
 
 // Reference:
 // https://github.com/jeaye/ncurses-rs/blob/master/src/ncurses.rs
@@ -82,7 +87,8 @@ fn main() {
     noecho();
 
     init_pair(ERROR_COLOR, COLOR_WHITE, COLOR_RED);
-    init_pair(HIGHLIGHT_COLOR, COLOR_WHITE, COLOR_BLACK);
+    init_pair(HIGHLIGHT_COLOR, COLOR_BLACK, COLOR_WHITE);
+    init_pair(NORMAL_COLOR, COLOR_WHITE, COLOR_BLACK);
 
     let screen_width  = getmaxx(stdscr());
     let mut screen_height = getmaxy(stdscr());
@@ -100,8 +106,6 @@ fn main() {
     let operations_window = newwin(screen_height, operations_window_width,
                                    0, opened_files_window_width);
 
-    let mut selected_operation = -1;
-
     // NOTE(erick): The name 'opened_files' is a bit misleading
     // since the files are only opened when the manipulation is
     // applied.
@@ -117,20 +121,21 @@ fn main() {
         wrefresh(opened_files_window);
 
         wprint_operations(operations_window,
-                          &operations, &opened_files,
-                          selected_operation);
+                          &operations, &opened_files, -1);
         wrefresh(operations_window);
 
         refresh();
 
         let mut key_o_pressed = false;
         let mut key_s_pressed = false;
+        let mut key_m_pressed = false;
 
         let ch = getch();
         match ch {
             KEY_Q => { break; },
             KEY_O => { key_o_pressed = true },
             KEY_S => { key_s_pressed = true },
+            KEY_M => { key_m_pressed = true },
 
             _     => { },
         };
@@ -152,9 +157,165 @@ fn main() {
                 operations.push(Operation::Save(0, opened_files.len() - 1));
             }
         }
+
+        if key_m_pressed {
+            let op = get_merge_operation(minibuffer_window, operations_window,
+                                         &operations, &opened_files);
+            if op.is_some() {
+                operations.push(op.unwrap());
+            }
+        }
     }
 
     endwin();
+}
+
+fn get_merge_operation(minibuffer_window: WINDOW, operations_window: WINDOW,
+                       operations: &Vec<Operation>,
+                       opened_files: &Vec<PathBuf>) -> Option<Operation> {
+    let operation0 = select_operation(minibuffer_window, operations_window,
+                                      &operations, &opened_files,
+                                      "Merge: (");
+    if operation0.is_none() { return None; }
+
+    let operation0 = operation0.unwrap();
+    let prompt = format!("Merge: ({}, ", operation0 + 1);
+    let operation1 = select_operation(minibuffer_window, operations_window,
+                                      &operations, &opened_files,
+                                      prompt.as_str());
+
+    if operation1.is_none() { return None; }
+
+    let operation1 = operation1.unwrap();
+    let direction = select_direction(minibuffer_window);
+
+    if direction.is_none() { return None; }
+
+    let direction = direction.unwrap();
+
+    Some(Operation::Merge(operation0, operation1, direction))
+}
+
+fn select_operation(minibuffer: WINDOW, window: WINDOW,
+                    operations: &Vec<Operation>,
+                    opened_files: &Vec<PathBuf>,
+                    prompt: &str) -> Option<usize> {
+    // NOTE(erick): Don't bother selecting from an empty list
+    if operations.len() == 0 { return None; }
+
+    let old_cursor = curs_set(CURSOR_INVISIBLE);
+    defer! {
+        if old_cursor.is_some() {
+            curs_set(old_cursor.unwrap());
+        }
+    }
+
+    clear_window(minibuffer);
+    wprintw(minibuffer, prompt);
+    wrefresh(minibuffer);
+
+    let mut selected: isize = 0;
+    loop {
+        let mut selected_increment = 0;
+
+        clear_window(window);
+        wprint_operations(window,
+                          operations, opened_files, selected as isize);
+        wrefresh(window);
+
+        let ch = getch();
+        match ch {
+            KEY_ENTER => { return Some(selected as usize); },
+            KEY_ESC   => { return None; },
+            KEY_Q     => { return None; },
+            KEY_UP    => { selected_increment = -1; },
+            KEY_DOWN  => { selected_increment =  1; },
+            _         => { },
+        }
+
+        if selected_increment != 0 {
+            selected += selected_increment;
+            if selected < 0 {
+                selected = (operations.len() - 1) as isize;
+            }
+            if selected as usize == operations.len() {
+                selected = 0;
+            }
+        }
+    }
+}
+
+fn select_direction(minibuffer: WINDOW) -> Option<Direction> {
+    let options = vec!['H', 'V'];
+    let chosen = select_from_options(minibuffer, &options, "Direction: ");
+
+    if chosen.is_none() {
+        return None;
+    }
+
+    match chosen.unwrap() {
+        'H' => Some(Direction::Horizontal),
+        'V' => Some(Direction::Vertical),
+        _   => None,
+    }
+}
+
+fn select_from_options(minibuffer: WINDOW,
+                       options: &Vec<char>,
+                       prompt: &str) -> Option<char> {
+    if options.len() == 0 { return None; }
+
+    let old_cursor = curs_set(CURSOR_INVISIBLE);
+    defer! {
+        if old_cursor.is_some() {
+            curs_set(old_cursor.unwrap());
+        }
+    }
+
+    let mut selected = 0;
+    loop {
+        clear_window(minibuffer);
+        change_to_color(minibuffer, NORMAL_COLOR);
+        wprintw(minibuffer, prompt);
+
+        let mut option_index = 0;
+        for c in options {
+            if option_index == selected {
+                change_to_color(minibuffer, HIGHLIGHT_COLOR);
+                waddch(minibuffer, *c as u32);
+                change_to_color(minibuffer, NORMAL_COLOR);
+            } else {
+                waddch(minibuffer, *c as u32);
+            }
+            waddch(minibuffer, ' ' as u32);
+
+            option_index += 1;
+        }
+
+        wrefresh(minibuffer);
+
+        let mut selected_increment = 0;
+
+        let ch = getch();
+        match ch {
+            KEY_ENTER => { return Some(options[selected as usize]); },
+            KEY_ESC   => { return None; },
+            KEY_Q     => { return None; },
+            KEY_LEFT  => { selected_increment = -1; },
+            KEY_RIGHT => { selected_increment =  1; },
+            _         => { },
+        }
+
+        if selected_increment != 0 {
+            selected += selected_increment;
+            if selected < 0 {
+                selected = (options.len() - 1) as isize;
+            }
+            if selected as usize == options.len() {
+                selected = 0;
+            }
+        }
+    }
 }
 
 #[allow(unused_variables, unused_assignments)]
@@ -175,7 +336,7 @@ fn open_file(win: WINDOW, screen_height: i32, screen_width: i32,
         wprintw(win, string.as_ref());
         wrefresh(win);
 
-        wbkgd(win, COLOR_PAIR(0));
+        change_to_color(win, NORMAL_COLOR);
 
         let mut auto_complete = false;
         let mut restart_state = true;
@@ -198,7 +359,7 @@ fn open_file(win: WINDOW, screen_height: i32, screen_width: i32,
                     if completion.len() > 0 {
                         string = maximum_prefix(completion);
                     }  else {
-                        wbkgd(win, COLOR_PAIR(ERROR_COLOR));
+                        change_to_color(win, ERROR_COLOR);
                     }
                 }
             } else {
@@ -211,10 +372,10 @@ fn open_file(win: WINDOW, screen_height: i32, screen_width: i32,
                             completion_index = 0;
                         }
                     } else {
-                        wbkgd(win, COLOR_PAIR(ERROR_COLOR));
+                        change_to_color(win, ERROR_COLOR);
                     }
                 } else {
-                    wbkgd(win, COLOR_PAIR(ERROR_COLOR));
+                    change_to_color(win, ERROR_COLOR);
                 }
             }
         }
@@ -227,7 +388,7 @@ fn open_file(win: WINDOW, screen_height: i32, screen_width: i32,
                                                           file_must_exists) {
                     return Some(path_buf);
                 } else {
-                    wbkgd(win, COLOR_PAIR(ERROR_COLOR));
+                    change_to_color(win, ERROR_COLOR);
                     done = false;
                 }
             }
@@ -376,11 +537,17 @@ fn maximum_prefix(strings: &Vec<String>) -> String {
 }
 
 fn clear_window(win: WINDOW) {
-    wbkgd(win, COLOR_PAIR(0));
+    change_to_color(win, NORMAL_COLOR);
     wclear(win);
     wrefresh(win);
 }
 
+#[inline]
+fn change_to_color(window: WINDOW, color: i16) {
+    wbkgd(window, COLOR_PAIR(color));
+}
+
+#[inline]
 fn get_char(ch: i32) -> char {
     char::from_u32(ch as u32).expect("Invalid char")
 }
@@ -424,8 +591,9 @@ fn wprint_files(window: WINDOW, files: &Vec<PathBuf>) {
 #[allow(unused_variables)]
 fn wprint_operations(window: WINDOW,
                      operations: &Vec<Operation>, opened_files: &Vec<PathBuf>,
-                     selected_operation: i32) {
+                     selected_operation: isize) {
     wmove(window, 0, 0);
+    change_to_color(window, NORMAL_COLOR);
     wprintw(window, "Operations:");
 
     // NOTE(erick): If selected_operation is -1 (meaning no operation is
@@ -434,10 +602,12 @@ fn wprint_operations(window: WINDOW,
     let mut operation_number = 1;
 
     for operation in operations {
-        wmove(window, operation_number, 0);
+        wmove(window, operation_number as i32, 0);
 
         if operation_number == selected_number {
-            wbkgd(window, COLOR_PAIR(HIGHLIGHT_COLOR));
+            change_to_color(window, HIGHLIGHT_COLOR);
+            wprintw(window, "> ");
+            change_to_color(window, NORMAL_COLOR);
         }
 
         wprintw(window, format!("{}: ", operation_number).as_str());
@@ -461,9 +631,6 @@ fn wprint_operations(window: WINDOW,
             },
         }
 
-        if operation_number == selected_number {
-            wbkgd(window, COLOR_PAIR(0));
-        }
         operation_number += 1;
     }
 }
