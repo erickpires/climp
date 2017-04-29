@@ -46,10 +46,26 @@ enum Operation {
     Crop(usize, u32, u32, i32, i32),
 }
 
-const KEY_Q         : i32 = 'q' as i32;
-const KEY_O         : i32 = 'o' as i32;
-const KEY_S         : i32 = 's' as i32;
+impl Display for Operation {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        match self {
+            &Operation::Open(ref file)
+                => write!(f, "Open({})", file),
+            &Operation::Save(ref op, ref file)
+                => write!(f, "Save({}, {})", op, file),
+            &Operation::Crop(ref op, ref x0, ref y0, ref w, ref h)
+                => write!(f, "Crop({}, {}, {}, {}, {})", op, x0, y0, w, h),
+            &Operation::Merge(ref op0, ref op1, ref dir)
+                => write!(f, "Merge({}, {}, {})", op0, op1, dir),
+        }
+    }
+}
+
+const KEY_C         : i32 = 'c' as i32;
 const KEY_M         : i32 = 'm' as i32;
+const KEY_O         : i32 = 'o' as i32;
+const KEY_Q         : i32 = 'q' as i32;
+const KEY_S         : i32 = 's' as i32;
 const KEY_TAB       : i32 = 0x09;
 const KEY_ENTER     : i32 = 0x0a;
 const KEY_BACKSPACE : i32 = 0x7f;
@@ -67,6 +83,7 @@ extern fn stop_program(_: i32) {
 const NORMAL_COLOR    : i16 = 1;
 const ERROR_COLOR     : i16 = 2;
 const HIGHLIGHT_COLOR : i16 = 3;
+const QUESTION_COLOR  : i16 = 4;
 
 // Reference:
 // https://github.com/jeaye/ncurses-rs/blob/master/src/ncurses.rs
@@ -89,6 +106,7 @@ fn main() {
     init_pair(ERROR_COLOR, COLOR_WHITE, COLOR_RED);
     init_pair(HIGHLIGHT_COLOR, COLOR_BLACK, COLOR_WHITE);
     init_pair(NORMAL_COLOR, COLOR_WHITE, COLOR_BLACK);
+    init_pair(QUESTION_COLOR, COLOR_WHITE, COLOR_BLUE);
 
     let screen_width  = getmaxx(stdscr());
     let mut screen_height = getmaxy(stdscr());
@@ -129,6 +147,7 @@ fn main() {
         let mut key_o_pressed = false;
         let mut key_s_pressed = false;
         let mut key_m_pressed = false;
+        let mut key_c_pressed = false;
 
         let ch = getch();
         match ch {
@@ -136,6 +155,7 @@ fn main() {
             KEY_O => { key_o_pressed = true },
             KEY_S => { key_s_pressed = true },
             KEY_M => { key_m_pressed = true },
+            KEY_C => { key_c_pressed = true },
 
             _     => { },
         };
@@ -161,6 +181,14 @@ fn main() {
         if key_m_pressed {
             let op = get_merge_operation(minibuffer_window, operations_window,
                                          &operations, &opened_files);
+            if op.is_some() {
+                operations.push(op.unwrap());
+            }
+        }
+
+        if key_c_pressed {
+            let op = get_crop_operation(minibuffer_window, operations_window,
+                                        &operations, &opened_files);
             if op.is_some() {
                 operations.push(op.unwrap());
             }
@@ -193,7 +221,71 @@ fn get_merge_operation(minibuffer_window: WINDOW, operations_window: WINDOW,
 
     let direction = direction.unwrap();
 
+    let confirmation_prompt = format!("Merge({}, {}, {})",
+                                      operation0, operation1, direction);
+    let confirmation = get_confirmation(minibuffer_window,
+                                        confirmation_prompt.as_str());
+    if !confirmation { return None; }
+
     Some(Operation::Merge(operation0, operation1, direction))
+}
+
+fn get_crop_operation(minibuffer_window: WINDOW, operations_window: WINDOW,
+                       operations: &Vec<Operation>,
+                       opened_files: &Vec<PathBuf>) -> Option<Operation> {
+    let operation = select_operation(minibuffer_window, operations_window,
+                                      &operations, &opened_files,
+                                      "Merge: (");
+    if operation.is_none() { return None; }
+
+    let x0 = enter_u32(minibuffer_window, "X0: ");
+    if x0.is_none() { return None; }
+
+    let y0 = enter_u32(minibuffer_window, "Y0: ");
+    if y0.is_none() { return None; }
+
+
+    let width = enter_u32(minibuffer_window, "WIDTH: ");
+    if width.is_none() { return None; }
+
+
+    let height = enter_u32(minibuffer_window, "HEIGHT: ");
+    if height.is_none() { return None; }
+
+
+    let operation = operation.unwrap();
+    let x0 = x0.unwrap();
+    let y0 = y0.unwrap();
+    let width = width.unwrap() as i32;
+    let height = height.unwrap() as i32;
+
+    let confirmation_prompt = format!("Crop({}, {}, {}, {}, {})",
+                                      operation,
+                                      x0, y0,
+                                      width, height);
+    let confirmation = get_confirmation(minibuffer_window,
+                                        confirmation_prompt.as_str());
+    if !confirmation { return None; }
+
+    Some(Operation::Crop(operation, x0, y0, width, height))
+}
+
+fn get_confirmation(minibuffer: WINDOW, prompt: &str) -> bool {
+    clear_window(minibuffer);
+    change_to_color(minibuffer, QUESTION_COLOR);
+    wprintw(minibuffer, prompt);
+    wprintw(minibuffer, " : Confirm?");
+    wrefresh(minibuffer);
+
+    loop {
+        let ch = getch();
+        match ch {
+            KEY_ENTER => { return true; },
+            KEY_ESC   => { return false; },
+            KEY_Q     => { return false; },
+            _         => {  },
+        }
+    }
 }
 
 fn select_operation(minibuffer: WINDOW, window: WINDOW,
@@ -275,7 +367,6 @@ fn select_from_options(minibuffer: WINDOW,
     let mut selected = 0;
     loop {
         clear_window(minibuffer);
-        change_to_color(minibuffer, NORMAL_COLOR);
         wprintw(minibuffer, prompt);
 
         let mut option_index = 0;
@@ -313,6 +404,48 @@ fn select_from_options(minibuffer: WINDOW,
             }
             if selected as usize == options.len() {
                 selected = 0;
+            }
+        }
+    }
+}
+
+fn enter_u32(minibuffer: WINDOW, prompt: &str) -> Option<u32> {
+    let mut string = String::new();
+    loop {
+        wclear(minibuffer);
+        wmove(minibuffer, 0, 0);
+        wprintw(minibuffer, prompt);
+        wprintw(minibuffer, string.as_str());
+        wrefresh(minibuffer);
+
+        change_to_color(minibuffer, NORMAL_COLOR);
+
+        let mut char_to_push = None;
+        let mut done = false;
+
+        let ch = getch();
+        match ch {
+            KEY_ENTER     => { done = true; },
+            KEY_ESC       => { return None; },
+            KEY_Q         => { return None; },
+            KEY_BACKSPACE => { string.pop(); },
+            _             => { char_to_push = Some(ch) },
+        };
+
+        if char_to_push.is_some() {
+            let char_to_push = get_char(char_to_push.unwrap());
+            match char_to_push {
+                ch @ '0' ... '9' => { string.push(ch); },
+                _               => { change_to_color(minibuffer, ERROR_COLOR); },
+            }
+        }
+
+        if done {
+            let parsed = string.parse::<u32>();
+            if parsed.is_ok() {
+                return Some(parsed.unwrap());
+            } else {
+                change_to_color(minibuffer, ERROR_COLOR);
             }
         }
     }
@@ -622,12 +755,8 @@ fn wprint_operations(window: WINDOW,
                 wprintw(window, format!("Save({}: {})", op_index,
                                         file_stem(&opened_files[file_index])).as_str());
             },
-            &Operation::Merge(op1_index, op2_index, ref dir) => {
-                wprintw(window, format!("Merge({}, {}, {})",
-                                        op1_index, op2_index, dir).as_str());
-            },
-            &Operation::Crop(op_index, x, y, w, h) => {
-
+            _  => {
+                wprintw(window, format!("{}", operation).as_str());
             },
         }
 
